@@ -45,6 +45,16 @@ struct DevinHookSettingsTests {
     #expect(commands.allSatisfy { ManagedHookCommandVariables.unexpected(in: $0).isEmpty })
   }
 
+  @Test func stopCommandReadsLastAssistantMessageForNotifyBody() throws {
+    // Devin's Stop hook stdin includes `last_assistant_message` (per the Devin
+    // CLI changelog), matching Claude Code. The notify body is extracted from
+    // that field rather than a fixed string.
+    let stop = try #require(try DevinHookSettings.hooksByEvent()["Stop"])
+    let commands = Self.commandStrings(in: stop)
+    #expect(!commands.isEmpty)
+    #expect(commands.allSatisfy { $0.contains("last_assistant_message") })
+  }
+
   @Test func postToolUseFiresIdleNotBusy() throws {
     let postToolUse = try #require(try DevinHookSettings.hooksByEvent()["PostToolUse"])
     let commands = Self.commandStrings(in: postToolUse)

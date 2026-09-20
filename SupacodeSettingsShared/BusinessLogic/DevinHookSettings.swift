@@ -19,8 +19,17 @@ nonisolated enum DevinHookSettingsError: Error {
 
 // Devin reads `hooks` from `~/.config/devin/config.json` in Claude's events
 // shape, with two deltas: there is no `Notification` event, and hook matchers
-// see snake_case tool names (`ask_user_question`, not `AskUserQuestion`). The
-// busy/idle/awaitingInput mapping otherwise mirrors `ClaudeHooksPayload`:
+// see snake_case tool names (`ask_user_question`, not `AskUserQuestion`).
+//
+// Sources verified against local Devin CLI docs (stable release, 2026-06):
+// - extensibility/hooks/overview.mdx: event names, hook format, matcher regexes
+//   (`""` or omitted matches every tool name).
+// - extensibility/hooks/lifecycle-hooks.mdx: per-event stdin fields, including
+//   `tool_name`, `tool_input`, `prompt`, `reason`, `stop_hook_active`.
+// - changelog/stable.mdx: Stop hooks receive `last_assistant_message` in stdin.
+// - reference/keyboard-shortcuts.mdx: image paste uses `Ctrl+V`.
+//
+// The busy/idle/awaitingInput mapping mirrors `ClaudeHooksPayload`:
 // `PermissionRequest` stands in for Claude's permission `Notification`, and
 // `Stop` carries `last_assistant_message`, so the stdin-sourced notify lands
 // the turn's final response like Claude's idle branch. `PostCompaction` is
