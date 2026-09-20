@@ -62,6 +62,30 @@ struct AgentHookSettingsFileInstallerTests {
     ]
   }
 
+  /// Two managed groups in one event whose order is load-bearing — the shape
+  /// of Devin's PreToolUse, where the catch-all `busy` group must precede the
+  /// specific awaiting-input matcher so the later emit wins.
+  private func orderedMultiGroupHookGroups() -> [String: [JSONValue]] {
+    let busy = AgentHookSettingsCommand.compositeCommand(
+      events: [.busy], forwardStdinAsNotification: false, agent: .devin)
+    let awaiting = AgentHookSettingsCommand.compositeCommand(
+      events: [.awaitingInput], forwardStdinAsNotification: false, agent: .devin)
+    func group(_ matcher: String, _ command: String) -> JSONValue {
+      .object([
+        "matcher": .string(matcher),
+        "hooks": .array([
+          .object(["type": "command", "command": .string(command), "timeout": 2])
+        ]),
+      ])
+    }
+    return [
+      "PreToolUse": [
+        group("", busy),
+        group("ask_user_question|exit_plan_mode", awaiting),
+      ]
+    ]
+  }
+
   // MARK: - Install.
 
   @Test func installIntoEmptyFileCreatesCorrectStructure() throws {
@@ -407,6 +431,58 @@ struct AgentHookSettingsFileInstallerTests {
     try JSONEncoder().encode(.object(root)).write(to: url)
 
     #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
+  }
+
+  @Test func installStateIsOutdatedWhenManagedGroupsAreReordered() throws {
+    // Hook groups execute in array order: reversing the catch-all busy group
+    // and the awaiting-input matcher group changes which emit wins. Every
+    // command is still present, so only an order-sensitive compare catches it.
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = orderedMultiGroupHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    hooks["PreToolUse"] = .array(hooks["PreToolUse"]!.arrayValue!.reversed())
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
+  }
+
+  @Test func installStateStaysInstalledWhenUserGroupIsInsertedBetweenManagedOnes() throws {
+    // Managed-group order is what matters — a user-authored group interleaved
+    // between ours changes absolute indices but not managed execution order,
+    // so it must not be reported as drift.
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = orderedMultiGroupHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    var preToolUse = hooks["PreToolUse"]!.arrayValue!
+    preToolUse.insert(
+      .object([
+        "matcher": "Bash",
+        "hooks": .array([
+          .object(["type": "command", "command": "echo user-hook", "timeout": 5])
+        ]),
+      ]),
+      at: 1
+    )
+    hooks["PreToolUse"] = .array(preToolUse)
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .installed)
   }
 
   @Test func containsMatchingHooksLogsInvalidJSONErrors() throws {

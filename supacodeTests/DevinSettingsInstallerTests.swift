@@ -98,6 +98,30 @@ struct DevinSettingsInstallerTests {
     #expect(try installer.installState() == .outdated)
   }
 
+  @Test func installStateReturnsOutdatedWhenPreToolUseMatcherOrderIsReversed() throws {
+    // Devin's PreToolUse groups execute in array order: the catch-all busy
+    // matcher must precede the awaiting-input matcher so ask_user_question
+    // resolves to awaiting_input. Reversed groups leave every command present
+    // but flip which emit wins — the compare must be order-sensitive.
+    let homeURL = makeTempHomeURL()
+    defer { try? fileManager.removeItem(at: homeURL) }
+
+    let installer = DevinSettingsInstaller(homeDirectoryURL: homeURL, fileManager: fileManager)
+    try installer.installAllHooks()
+
+    let settingsURL = DevinSettingsInstaller.settingsURL(homeDirectoryURL: homeURL)
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: settingsURL))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    hooks["PreToolUse"] = .array(hooks["PreToolUse"]!.arrayValue!.reversed())
+    root["hooks"] = .object(hooks)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(.object(root)).write(to: settingsURL)
+
+    #expect(try installer.installState() == .outdated)
+  }
+
   @Test func installAllHooksWritesManagedHooksIntoConfigJson() throws {
     let homeURL = makeTempHomeURL()
     defer { try? fileManager.removeItem(at: homeURL) }

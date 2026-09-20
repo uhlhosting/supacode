@@ -31,11 +31,13 @@ nonisolated struct AgentHookSettingsFileInstaller {
   ///                      stale variants, duplicates, or a managed command
   ///                      parked under the wrong event/matcher)
   ///
-  /// Occurrences are counted per (event, matcher, command) slot rather than
-  /// compared as a command `Set`: canonical payloads legitimately reuse one
-  /// command string in several slots (e.g. `busy` under both `UserPromptSubmit`
-  /// and the catch-all `PreToolUse` group), and a set would miss one of those
-  /// slots being deleted or duplicated.
+  /// The comparison is the ordered sequence of managed groups per event
+  /// (matcher + managed commands, in array order) rather than a command
+  /// `Set`. Canonical payloads legitimately reuse one command string in
+  /// several slots (e.g. `busy` under both `UserPromptSubmit` and the
+  /// catch-all `PreToolUse` group), and hook groups execute in array order —
+  /// a reordered or partially deleted slot must read as drift, while a
+  /// user-authored group inserted between managed ones must not.
   ///
   /// `additionalOutdatedIfInstalled` runs only when the command set already
   /// matches, against the **same** parsed snapshot (no second disk read). Use
@@ -65,41 +67,45 @@ nonisolated struct AgentHookSettingsFileInstaller {
     }
   }
 
-  /// One managed-command occurrence, identified by where it lives: the event,
-  /// the owning group's `matcher` (nil when the key is absent), and the command
-  /// string. Occurrence counts per slot are what `installState` compares.
-  private struct CommandOccurrence: Hashable {
-    let event: String
+  /// The managed content of one hook group, in execution order: the group's
+  /// `matcher` (nil when the key is absent) plus its Supacode-managed commands
+  /// in array order. `installState` compares the ordered sequence of these
+  /// per event, so reordered groups read as drift even when every command is
+  /// still present.
+  private struct ManagedGroupOccurrence: Hashable {
     let matcher: JSONValue?
-    let command: String
+    let commands: [String]
   }
 
-  /// Supacode-managed occurrences under the `hooks` map, counted per
-  /// (event, matcher, command) slot. Filters via `AgentHookCommandOwnership`
-  /// so user-authored hooks are never treated as "ours."
+  /// Supacode-managed groups under the `hooks` map, kept in array order per
+  /// event. A group contributes only its managed commands — user-authored
+  /// hooks and fully user-authored groups are skipped, so inserting a custom
+  /// group between managed ones is not drift.
   private static func installedSupacodeCommands(
     in settingsObject: [String: JSONValue]
-  ) -> [CommandOccurrence: Int] {
+  ) -> [String: [ManagedGroupOccurrence]] {
     guard let hooksValue = settingsObject["hooks"],
       let hooksObject = hooksValue.objectValue
     else { return [:] }
-    var occurrences: [CommandOccurrence: Int] = [:]
+    var occurrences: [String: [ManagedGroupOccurrence]] = [:]
     for (event, value) in hooksObject {
       guard let groups = value.arrayValue else { continue }
-      for group in groups {
+      let managed = groups.compactMap { group -> ManagedGroupOccurrence? in
         guard let groupObject = group.objectValue,
           let hooks = groupObject["hooks"]?.arrayValue
-        else { continue }
-        for hook in hooks {
+        else { return nil }
+        let commands = hooks.compactMap { hook -> String? in
           guard let hookObject = hook.objectValue,
             let command = hookObject["command"]?.stringValue,
             AgentHookCommandOwnership.isSupacodeManagedCommand(command)
-          else { continue }
-          occurrences[
-            CommandOccurrence(event: event, matcher: groupObject["matcher"], command: command),
-            default: 0
-          ] += 1
+          else { return nil }
+          return command
         }
+        guard !commands.isEmpty else { return nil }
+        return ManagedGroupOccurrence(matcher: groupObject["matcher"], commands: commands)
+      }
+      if !managed.isEmpty {
+        occurrences[event] = managed
       }
     }
     return occurrences
@@ -107,22 +113,19 @@ nonisolated struct AgentHookSettingsFileInstaller {
 
   private static func expectedCommandOccurrences(
     from hookGroupsByEvent: [String: [JSONValue]]
-  ) -> [CommandOccurrence: Int] {
-    var occurrences: [CommandOccurrence: Int] = [:]
+  ) -> [String: [ManagedGroupOccurrence]] {
+    var occurrences: [String: [ManagedGroupOccurrence]] = [:]
     for (event, groups) in hookGroupsByEvent {
-      for group in groups {
+      let managed = groups.compactMap { group -> ManagedGroupOccurrence? in
         guard let groupObject = group.objectValue,
           let hooks = groupObject["hooks"]?.arrayValue
-        else { continue }
-        for hook in hooks {
-          guard let hookObject = hook.objectValue,
-            let command = hookObject["command"]?.stringValue
-          else { continue }
-          occurrences[
-            CommandOccurrence(event: event, matcher: groupObject["matcher"], command: command),
-            default: 0
-          ] += 1
-        }
+        else { return nil }
+        let commands = hooks.compactMap { $0.objectValue?["command"]?.stringValue }
+        guard !commands.isEmpty else { return nil }
+        return ManagedGroupOccurrence(matcher: groupObject["matcher"], commands: commands)
+      }
+      if !managed.isEmpty {
+        occurrences[event] = managed
       }
     }
     return occurrences
