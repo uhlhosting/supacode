@@ -485,6 +485,54 @@ struct AgentHookSettingsFileInstallerTests {
     #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .installed)
   }
 
+  @Test func installStateIsOutdatedWhenManagedHookTimeoutChanges() throws {
+    // The command text is unchanged but execution-relevant metadata drifted,
+    // so the update affordance must appear.
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = sampleHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    var stopGroup = hooks["Stop"]!.arrayValue![0].objectValue!
+    var stopHooks = stopGroup["hooks"]!.arrayValue!
+    var hookObject = stopHooks[0].objectValue!
+    hookObject["timeout"] = 99
+    stopGroup["hooks"] = .array([.object(hookObject)])
+    hooks["Stop"] = .array([.object(stopGroup)])
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
+  }
+
+  @Test func installStateIsOutdatedWhenManagedHookTypeChanges() throws {
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = sampleHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    var stopGroup = hooks["Stop"]!.arrayValue![0].objectValue!
+    var stopHooks = stopGroup["hooks"]!.arrayValue!
+    var hookObject = stopHooks[0].objectValue!
+    hookObject["type"] = "shell"
+    stopGroup["hooks"] = .array([.object(hookObject)])
+    hooks["Stop"] = .array([.object(stopGroup)])
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
+  }
+
   @Test func containsMatchingHooksLogsInvalidJSONErrors() throws {
     let url = makeTempURL()
     let warnings = LockIsolated<[String]>([])
