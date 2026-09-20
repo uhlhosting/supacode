@@ -45,6 +45,23 @@ struct AgentHookSettingsFileInstallerTests {
     ]
   }
 
+  /// Canonical payload where one command string legitimately occupies two
+  /// slots — the shape Devin's `busy` hook has (UserPromptSubmit + catch-all
+  /// PreToolUse). Guards the occurrence-level compare against Set collapse.
+  private func duplicatedCommandHookGroups() -> [String: [JSONValue]] {
+    let busy = AgentHookSettingsCommand.compositeCommand(
+      events: [.busy], forwardStdinAsNotification: false, agent: .devin)
+    let hook: JSONValue = .object([
+      "type": "command",
+      "command": .string(busy),
+      "timeout": 2,
+    ])
+    return [
+      "UserPromptSubmit": [.object(["hooks": .array([hook])])],
+      "PreToolUse": [.object(["matcher": "", "hooks": .array([hook])])],
+    ]
+  }
+
   // MARK: - Install.
 
   @Test func installIntoEmptyFileCreatesCorrectStructure() throws {
@@ -344,6 +361,52 @@ struct AgentHookSettingsFileInstallerTests {
     let url = makeTempURL()
     let installer = makeInstaller()
     #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: sampleHookGroups()) != .installed)
+  }
+
+  @Test func installStateIsOutdatedWhenOneDuplicateManagedOccurrenceIsRemoved() throws {
+    // The command Set compare collapses a duplicated managed command across
+    // slots: deleting the catch-all PreToolUse `busy` group leaves `busy`
+    // present under UserPromptSubmit, so the drift was invisible. Occurrences
+    // are counted per (event, matcher, command) slot, so this must be outdated.
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = duplicatedCommandHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    hooks["PreToolUse"] = .array(
+      hooks["PreToolUse"]!.arrayValue!
+        .filter { $0.objectValue?["matcher"] != .string("") })
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
+  }
+
+  @Test func installStateIsOutdatedWhenManagedCommandIsParkedUnderWrongEvent() throws {
+    // Same command string, wrong slot: moving `busy` from UserPromptSubmit to
+    // SessionStart keeps the command set identical but shifts an occurrence,
+    // which the slot-keyed compare must surface as drift.
+    let url = makeTempURL()
+    defer { try? fileManager.removeItem(at: url.deletingLastPathComponent()) }
+
+    let installer = makeInstaller()
+    let groups = duplicatedCommandHookGroups()
+    try installer.install(settingsURL: url, hookGroupsByEvent: groups)
+
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: url))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    hooks["SessionStart"] = hooks["UserPromptSubmit"]
+    hooks["UserPromptSubmit"] = .array([])
+    root["hooks"] = .object(hooks)
+    try JSONEncoder().encode(.object(root)).write(to: url)
+
+    #expect(try installer.installState(settingsURL: url, hookGroupsByEvent: groups) == .outdated)
   }
 
   @Test func containsMatchingHooksLogsInvalidJSONErrors() throws {

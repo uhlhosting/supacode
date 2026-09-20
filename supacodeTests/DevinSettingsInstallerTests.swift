@@ -70,6 +70,34 @@ struct DevinSettingsInstallerTests {
     #expect(try installer.installState() == .outdated)
   }
 
+  @Test func installStateReturnsOutdatedWhenOneDuplicateBusyHookIsRemoved() throws {
+    // Devin's canonical payload reuses the same `busy` command under both
+    // UserPromptSubmit and the catch-all PreToolUse group. Removing only the
+    // PreToolUse occurrence must read as drift — a command-string Set compare
+    // would still see `busy` and wrongly report `.installed`.
+    let homeURL = makeTempHomeURL()
+    defer { try? fileManager.removeItem(at: homeURL) }
+
+    let installer = DevinSettingsInstaller(homeDirectoryURL: homeURL, fileManager: fileManager)
+    try installer.installAllHooks()
+
+    let settingsURL = DevinSettingsInstaller.settingsURL(homeDirectoryURL: homeURL)
+    var root = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: settingsURL))
+      .objectValue!
+    var hooks = root["hooks"]!.objectValue!
+    // Drop the catch-all PreToolUse group (matcher ""), keep the awaiting-input
+    // matcher group — the user's other managed hooks stay untouched.
+    hooks["PreToolUse"] = .array(
+      hooks["PreToolUse"]!.arrayValue!
+        .filter { $0.objectValue?["matcher"] != .string("") })
+    root["hooks"] = .object(hooks)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(.object(root)).write(to: settingsURL)
+
+    #expect(try installer.installState() == .outdated)
+  }
+
   @Test func installAllHooksWritesManagedHooksIntoConfigJson() throws {
     let homeURL = makeTempHomeURL()
     defer { try? fileManager.removeItem(at: homeURL) }

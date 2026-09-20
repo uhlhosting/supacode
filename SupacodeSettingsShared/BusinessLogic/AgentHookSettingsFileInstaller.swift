@@ -23,12 +23,19 @@ nonisolated struct AgentHookSettingsFileInstaller {
     JSONHookSettingsFile(fileManager: fileManager, errors: errors)
   }
 
-  /// Compare the set of Supacode-managed commands present in the settings
-  /// file against the expected (canonical) set:
-  /// - `.installed`     — actual Supacode commands == expected, no extras
+  /// Compare the Supacode-managed command occurrences present in the settings
+  /// file against the expected (canonical) occurrences:
+  /// - `.installed`     — actual Supacode occurrences == expected, no extras
   /// - `.notInstalled`  — no Supacode-managed commands at all
-  /// - `.outdated`      — some present, but the set differs (extras, missing,
-  ///                      or stale variants from older Supacode versions)
+  /// - `.outdated`      — some present, but occurrences differ (extras, missing,
+  ///                      stale variants, duplicates, or a managed command
+  ///                      parked under the wrong event/matcher)
+  ///
+  /// Occurrences are counted per (event, matcher, command) slot rather than
+  /// compared as a command `Set`: canonical payloads legitimately reuse one
+  /// command string in several slots (e.g. `busy` under both `UserPromptSubmit`
+  /// and the catch-all `PreToolUse` group), and a set would miss one of those
+  /// slots being deleted or duplicated.
   ///
   /// `additionalOutdatedIfInstalled` runs only when the command set already
   /// matches, against the **same** parsed snapshot (no second disk read). Use
@@ -43,7 +50,7 @@ nonisolated struct AgentHookSettingsFileInstaller {
   ) throws -> ComponentInstallState {
     do {
       let settingsObject = try loadSettingsObject(at: settingsURL)
-      let expected = Self.commands(from: hookGroupsByEvent)
+      let expected = Self.expectedCommandOccurrences(from: hookGroupsByEvent)
       guard !expected.isEmpty else { return .notInstalled }
       let actual = Self.installedSupacodeCommands(in: settingsObject)
       if actual.isEmpty { return .notInstalled }
@@ -58,17 +65,26 @@ nonisolated struct AgentHookSettingsFileInstaller {
     }
   }
 
-  /// All Supacode-marked `command` strings under the `hooks` map. Filters
-  /// via `AgentHookCommandOwnership` so user-authored hooks are never
-  /// treated as "ours."
+  /// One managed-command occurrence, identified by where it lives: the event,
+  /// the owning group's `matcher` (nil when the key is absent), and the command
+  /// string. Occurrence counts per slot are what `installState` compares.
+  private struct CommandOccurrence: Hashable {
+    let event: String
+    let matcher: JSONValue?
+    let command: String
+  }
+
+  /// Supacode-managed occurrences under the `hooks` map, counted per
+  /// (event, matcher, command) slot. Filters via `AgentHookCommandOwnership`
+  /// so user-authored hooks are never treated as "ours."
   private static func installedSupacodeCommands(
     in settingsObject: [String: JSONValue]
-  ) -> Set<String> {
+  ) -> [CommandOccurrence: Int] {
     guard let hooksValue = settingsObject["hooks"],
       let hooksObject = hooksValue.objectValue
-    else { return [] }
-    var commands = Set<String>()
-    for (_, value) in hooksObject {
+    else { return [:] }
+    var occurrences: [CommandOccurrence: Int] = [:]
+    for (event, value) in hooksObject {
       guard let groups = value.arrayValue else { continue }
       for group in groups {
         guard let groupObject = group.objectValue,
@@ -79,16 +95,21 @@ nonisolated struct AgentHookSettingsFileInstaller {
             let command = hookObject["command"]?.stringValue,
             AgentHookCommandOwnership.isSupacodeManagedCommand(command)
           else { continue }
-          commands.insert(command)
+          occurrences[
+            CommandOccurrence(event: event, matcher: groupObject["matcher"], command: command),
+            default: 0
+          ] += 1
         }
       }
     }
-    return commands
+    return occurrences
   }
 
-  private static func commands(from hookGroupsByEvent: [String: [JSONValue]]) -> Set<String> {
-    var commands = Set<String>()
-    for (_, groups) in hookGroupsByEvent {
+  private static func expectedCommandOccurrences(
+    from hookGroupsByEvent: [String: [JSONValue]]
+  ) -> [CommandOccurrence: Int] {
+    var occurrences: [CommandOccurrence: Int] = [:]
+    for (event, groups) in hookGroupsByEvent {
       for group in groups {
         guard let groupObject = group.objectValue,
           let hooks = groupObject["hooks"]?.arrayValue
@@ -97,11 +118,14 @@ nonisolated struct AgentHookSettingsFileInstaller {
           guard let hookObject = hook.objectValue,
             let command = hookObject["command"]?.stringValue
           else { continue }
-          commands.insert(command)
+          occurrences[
+            CommandOccurrence(event: event, matcher: groupObject["matcher"], command: command),
+            default: 0
+          ] += 1
         }
       }
     }
-    return commands
+    return occurrences
   }
 
   /// Removes every Supacode-managed command (current and legacy) from the
